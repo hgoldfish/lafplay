@@ -7,101 +7,121 @@ class EventPrivate
 {
 public:
     EventPrivate();
+    inline void incref();
+    inline bool decref();
+    bool wait(unsigned long time);
+public:
     QWaitCondition condition;
     QMutex mutex;
     QAtomicInteger<bool> flag;
+    QAtomicInteger<int> ref;
     QAtomicInteger<quint32> waiters;
 };
 
 
 EventPrivate::EventPrivate()
     : flag(false)
+    , ref(1)
     , waiters(0)
 {}
 
 
-Event::Event()
-    :d_ptr(new EventPrivate())
+void EventPrivate::incref()
 {
+    ref.ref();
+}
+
+
+bool EventPrivate::decref()
+{
+    if (!ref.deref()) {
+        delete this;
+        return false;
+    }
+    return true;
+}
+
+
+bool EventPrivate::wait(unsigned long time)
+{
+    bool f = flag.loadAcquire();
+    if (time == 0 || f) {
+        return f;
+    }
+
+    incref();
+    mutex.lock();
+    Q_ASSERT(!f);
+    ++waiters;
+    while (!(f = flag.loadAcquire()) && ref.loadAcquire() > 1) {
+        condition.wait(&mutex);
+    }
+    --waiters;
+    mutex.unlock();
+    decref();
+    return f;
+}
+
+
+Event::Event()
+    :d(new EventPrivate()) {}
+
+
+Event::~Event()
+{
+    if (d->decref()) {
+        d->condition.wakeAll();
+    }
+    d = nullptr;
 }
 
 
 void Event::set()
 {
-    Q_D(Event);
-    d->mutex.lock();
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
-    if (!d->flag.loadAcquire()) {
-        d->flag.storeRelease(true);
-        d->condition.wakeAll();
+    if (d) {
+        if (d->flag.fetchAndStoreAcquire(true)) {
+            return;
+        }
+        if (d->waiters.loadAcquire() > 0) {
+            d->condition.wakeAll();
+        }
     }
-#else
-    if (!d->flag.load()) {
-        d->flag.store(true);
-        d->condition.wakeAll();
-    }
-#endif
-    d->mutex.unlock();
 }
 
 
 void Event::clear()
 {
-    Q_D(Event);
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
-    d->flag.storeRelaxed(false);
-#else
-    d->flag.store(false);
-#endif
+    if (d) {
+        d->flag.storeRelease(false);
+    }
 }
 
 
 bool Event::wait(unsigned long time)
 {
-    Q_D(Event);
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
-    if (!d->flag.loadAcquire()) {
-        d->mutex.lock();
-        if (!d->flag.loadAcquire()) {
-            ++d->waiters;
-            d->condition.wait(&d->mutex, time);
-            --d->waiters;
-        }
-        d->mutex.unlock();
+    if (d) {
+        return d->wait(time);
+    } else {
+        return false;
     }
-    return d->flag.loadAcquire();
-#else
-    if (!d->flag.load()) {
-        d->mutex.lock();
-        if (!d->flag.load()) {
-            ++d->waiters;
-            d->condition.wait(&d->mutex, time);
-            --d->waiters;
-        }
-        d->mutex.unlock();
-    }
-    return d->flag.load();
-#endif
 }
 
 
 bool Event::isSet() const
 {
-    Q_D(const Event);
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
-    return d->flag.loadRelaxed();
-#else
-    return d->flag.load();
-#endif
+    if (d) {
+        return d->flag.loadAcquire();
+    } else {
+        return false;
+    }
 }
 
 
 quint32 Event::getting() const
 {
-    Q_D(const Event);
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
-    return d->waiters.loadRelaxed();
-#else
-    return d->waiters.load();
-#endif
+    if (d) {
+        return d->waiters.loadAcquire();
+    } else {
+        return 0;
+    }
 }
