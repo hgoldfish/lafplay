@@ -66,6 +66,11 @@ set(LAFPLAY_SOURCES
     image_selector.cpp
 )
 
+if (${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
+    set(LAFPLAY_INCLUDES ${LAFPLAY_INCLUDES} win_hotkey.h)
+    set(LAFPLAY_SOURCES ${LAFPLAY_SOURCES} win_hotkey.cpp)
+endif()
+
 add_library(lafplay ${LAFPLAY_INCLUDES} ${LAFPLAY_SOURCES})
 target_include_directories(lafplay PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(lafplay PUBLIC Qt5::Core Qt5::Gui Qt5::Widgets)

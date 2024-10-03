@@ -26,19 +26,20 @@ public:
     double timeBase;
 };
 
-class DecoderThread: public QThread
-{
-public:
-    DecoderThread();
-    virtual ~DecoderThread() override;
-public:
-    virtual void run() override;
-public:
-    ParseResult parse(const QString &filePath);
-    void seek
+//class DecoderThread: public QThread
+//{
+//public:
+//    DecoderThread();
+//    virtual ~DecoderThread() override;
+//public:
+//    virtual void run() override;
+//public:
+//    ParseResult parse(const QString &filePath);
+//    void seek
 
-};
+//};
 
+class DecoderThread;
 class AnimationViewerPrivate : public ImageViewerPrivate
 {
     Q_OBJECT
