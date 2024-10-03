@@ -1,9 +1,8 @@
-#ifndef BLOCKING_QUEUE_H
-#define BLOCKING_QUEUE_H
+#ifndef LAFPLAY_BLOCKING_QUEUE_H
+#define LAFPLAY_BLOCKING_QUEUE_H
 
 #include <QtCore/qqueue.h>
 #include <QtCore/qreadwritelock.h>
-
 
 class EventPrivate;
 class Event
@@ -21,20 +20,22 @@ private:
     EventPrivate *d;
 };
 
-
-template <typename T>
+template<typename T>
 class BlockingQueue
 {
 public:
     explicit BlockingQueue(quint32 capacity);
-    BlockingQueue() : BlockingQueue(UINT_MAX) {}
+    BlockingQueue()
+        : BlockingQueue(UINT_MAX)
+    {
+    }
     ~BlockingQueue();
 public:
     void setCapacity(quint32 capacity);
-    bool put(const T &e);             // insert e to the tail of queue. blocked until not full.
-    bool putForcedly(const T& e);     // insert e to the tail of queue ignoring capacity.
-    bool returns(const T &e);         // like put() but insert e to the head of queue.
-    bool returnsForcely(const T& e);  // like putForcedly() but insert e to the head of queue.
+    bool put(const T &e);  // insert e to the tail of queue. blocked until not full.
+    bool putForcedly(const T &e);  // insert e to the tail of queue ignoring capacity.
+    bool returns(const T &e);  // like put() but insert e to the head of queue.
+    bool returnsForcely(const T &e);  // like putForcedly() but insert e to the head of queue.
     T get();
     T peek();
     void clear();
@@ -55,8 +56,7 @@ private:
     Q_DISABLE_COPY(BlockingQueue)
 };
 
-
-template <typename T>
+template<typename T>
 BlockingQueue<T>::BlockingQueue(quint32 capacity)
     : mCapacity(capacity)
 {
@@ -64,17 +64,15 @@ BlockingQueue<T>::BlockingQueue(quint32 capacity)
     notFull.set();
 }
 
-
-template <typename T>
+template<typename T>
 BlockingQueue<T>::~BlockingQueue()
 {
-//    if (queue.size() > 0) {
-//        qtng_debug << "queue is free with element left.";
-//    }
+    //    if (queue.size() > 0) {
+    //        qtng_debug << "queue is free with element left.";
+    //    }
 }
 
-
-template <typename T>
+template<typename T>
 void BlockingQueue<T>::setCapacity(quint32 capacity)
 {
     lock.lockForWrite();
@@ -87,8 +85,7 @@ void BlockingQueue<T>::setCapacity(quint32 capacity)
     lock.unlock();
 }
 
-
-template <typename T>
+template<typename T>
 void BlockingQueue<T>::clear()
 {
     lock.lockForWrite();
@@ -98,8 +95,7 @@ void BlockingQueue<T>::clear()
     lock.unlock();
 }
 
-
-template <typename T>
+template<typename T>
 bool BlockingQueue<T>::remove(const T &e)
 {
     lock.lockForWrite();
@@ -123,26 +119,17 @@ bool BlockingQueue<T>::remove(const T &e)
     }
 }
 
-
-template <typename T>
+template<typename T>
 bool BlockingQueue<T>::put(const T &e)
 {
     if (!notFull.wait()) {
         return false;
     }
-    lock.lockForWrite();
-    queue.enqueue(e);
-    notEmpty.set();
-    if (static_cast<quint32>(queue.size()) >= mCapacity) {
-        notFull.clear();
-    }
-    lock.unlock();
-    return true;
+    return putForcedly(e);
 }
 
-
-template <typename T>
-bool BlockingQueue<T>::putForcedly(const T& e)
+template<typename T>
+bool BlockingQueue<T>::putForcedly(const T &e)
 {
     lock.lockForWrite();
     queue.enqueue(e);
@@ -154,26 +141,17 @@ bool BlockingQueue<T>::putForcedly(const T& e)
     return true;
 }
 
-
-template <typename T>
+template<typename T>
 bool BlockingQueue<T>::returns(const T &e)
 {
     if (!notFull.wait()) {
         return false;
     }
-    lock.lockForWrite();
-    queue.prepend(e);
-    notEmpty.set();
-    if (static_cast<quint32>(queue.size()) >= mCapacity) {
-        notFull.clear();
-    }
-    lock.unlock();
-    return true;
+    return returnsForcely(e);
 }
 
-
-template <typename T>
-bool BlockingQueue<T>::returnsForcely(const T& e)
+template<typename T>
+bool BlockingQueue<T>::returnsForcely(const T &e)
 {
     lock.lockForWrite();
     queue.prepend(e);
@@ -185,8 +163,7 @@ bool BlockingQueue<T>::returnsForcely(const T& e)
     return true;
 }
 
-
-template <typename T>
+template<typename T>
 T BlockingQueue<T>::get()
 {
     if (!notEmpty.wait())
@@ -203,12 +180,12 @@ T BlockingQueue<T>::get()
     return e;
 }
 
-
-template <typename T>
+template<typename T>
 T BlockingQueue<T>::peek()
 {
     lock.lockForRead();
     if (this->queue.isEmpty()) {
+        lock.unlock();
         return T();
     }
     const T &t = queue.head();
@@ -216,8 +193,7 @@ T BlockingQueue<T>::peek()
     return t;
 }
 
-
-template <typename T>
+template<typename T>
 inline bool BlockingQueue<T>::isEmpty()
 {
     lock.lockForRead();
@@ -226,8 +202,7 @@ inline bool BlockingQueue<T>::isEmpty()
     return t;
 }
 
-
-template <typename T>
+template<typename T>
 inline bool BlockingQueue<T>::isFull()
 {
     lock.lockForRead();
@@ -236,8 +211,7 @@ inline bool BlockingQueue<T>::isFull()
     return t;
 }
 
-
-template <typename T>
+template<typename T>
 inline quint32 BlockingQueue<T>::capacity() const
 {
     const_cast<BlockingQueue<T> *>(this)->lock.lockForRead();
@@ -246,8 +220,7 @@ inline quint32 BlockingQueue<T>::capacity() const
     return c;
 }
 
-
-template <typename T>
+template<typename T>
 inline quint32 BlockingQueue<T>::size() const
 {
     const_cast<BlockingQueue<T> *>(this)->lock.lockForRead();
@@ -256,8 +229,7 @@ inline quint32 BlockingQueue<T>::size() const
     return s;
 }
 
-
-template <typename T>
+template<typename T>
 inline quint32 BlockingQueue<T>::getting() const
 {
     const_cast<BlockingQueue<T> *>(this)->lock.lockForRead();
@@ -266,8 +238,7 @@ inline quint32 BlockingQueue<T>::getting() const
     return g;
 }
 
-
-template <typename T>
+template<typename T>
 inline bool BlockingQueue<T>::contains(const T &e)
 {
     const_cast<BlockingQueue<T> *>(this)->lock.lockForRead();
@@ -276,5 +247,4 @@ inline bool BlockingQueue<T>::contains(const T &e)
     return t;
 }
 
-
-#endif // BLOCKING_QUEUE_H
+#endif  // BLOCKING_QUEUE_H

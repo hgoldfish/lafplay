@@ -1,11 +1,10 @@
-#ifndef LAFPLAY_H
-#define LAFPLAY_H
+#ifndef LAFPLAY_IMAGE_VIEWER_H
+#define LAFPLAY_IMAGE_VIEWER_H
 
 #include <QtWidgets/qlabel.h>
 
-
 class ImageViewerPrivate;
-class ImageViewer: public QWidget
+class ImageViewer : public QWidget
 {
     Q_OBJECT
 public:
@@ -43,7 +42,7 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void hideEvent(QHideEvent *event) override;
-//    void wheelEvent(QWheelEvent *event) override;
+    //    void wheelEvent(QWheelEvent *event) override;
 protected:
     ImageViewerPrivate * const dd_ptr;
     ImageViewer(QWidget *parent, ImageViewerPrivate *d);
@@ -51,32 +50,4 @@ private:
     Q_DECLARE_PRIVATE_D(dd_ptr, ImageViewer)
 };
 
-
-class AnimationViewerPrivate;
-class AnimationViewer: public ImageViewer
-{
-    Q_OBJECT
-public:
-    explicit AnimationViewer(QWidget *parent = nullptr);
-    virtual ~AnimationViewer() override;
-public:
-    virtual QString imagePath() override;
-public slots:
-    virtual bool setFile(const QString &filePath) override;
-    bool play();
-    void stop();
-    void pause();
-    void setAutoRepeat(bool autoRepeat);
-protected:
-    void hideEvent(QHideEvent *event) override;
-    void showEvent(QShowEvent *event) override;
-signals:
-    void finished();
-private:
-    Q_DECLARE_PRIVATE_D(dd_ptr, AnimationViewer)
-};
-
-
-QList<QImage> convertVideoToImages(const QString &filePath, QString *reason);
-
-#endif
+#endif // LAFPLAY_IMAGE_VIEWER_H

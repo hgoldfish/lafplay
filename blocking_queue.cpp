@@ -2,7 +2,6 @@
 #include <QtCore/qmutex.h>
 #include "blocking_queue.h"
 
-
 class EventPrivate
 {
 public:
@@ -18,19 +17,17 @@ public:
     QAtomicInteger<quint32> waiters;
 };
 
-
 EventPrivate::EventPrivate()
     : flag(false)
     , ref(1)
     , waiters(0)
-{}
-
+{
+}
 
 void EventPrivate::incref()
 {
     ref.ref();
 }
-
 
 bool EventPrivate::decref()
 {
@@ -40,7 +37,6 @@ bool EventPrivate::decref()
     }
     return true;
 }
-
 
 bool EventPrivate::wait(unsigned long time)
 {
@@ -62,10 +58,10 @@ bool EventPrivate::wait(unsigned long time)
     return f;
 }
 
-
 Event::Event()
-    :d(new EventPrivate()) {}
-
+    : d(new EventPrivate())
+{
+}
 
 Event::~Event()
 {
@@ -75,19 +71,19 @@ Event::~Event()
     d = nullptr;
 }
 
-
 void Event::set()
 {
     if (d) {
         if (d->flag.fetchAndStoreAcquire(true)) {
             return;
         }
+        d->incref();
         if (d->waiters.loadAcquire() > 0) {
             d->condition.wakeAll();
         }
+        d->decref();
     }
 }
-
 
 void Event::clear()
 {
@@ -95,7 +91,6 @@ void Event::clear()
         d->flag.storeRelease(false);
     }
 }
-
 
 bool Event::wait(unsigned long time)
 {
@@ -106,7 +101,6 @@ bool Event::wait(unsigned long time)
     }
 }
 
-
 bool Event::isSet() const
 {
     if (d) {
@@ -115,7 +109,6 @@ bool Event::isSet() const
         return false;
     }
 }
-
 
 quint32 Event::getting() const
 {
