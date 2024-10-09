@@ -85,6 +85,6 @@ if (HAS_FFMPEG)
 endif()
 
 if(LAFPLAY_BUILD_TESTS)
-    add_executable(lafplay_test main.cpp)
-    target_link_libraries(lafplay_test lafplay)
+    add_executable(play_test main.cpp)
+    target_link_libraries(play_test lafplay)
 endif()

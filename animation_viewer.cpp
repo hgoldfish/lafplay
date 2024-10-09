@@ -119,8 +119,8 @@ AVContext *makeContext(const QString &url, QString *reason)
     context->nativeFrame = av_frame_alloc();
     AVFrame *rgbFrame = av_frame_alloc();
     context->rgbFrame = rgbFrame;
-    if (av_image_alloc(rgbFrame->data, rgbFrame->linesize, context->codecCtx->width,
-                       context->codecCtx->height, AV_PIX_FMT_RGBA, 32)
+    if (av_image_alloc(rgbFrame->data, rgbFrame->linesize, context->codecCtx->width, context->codecCtx->height,
+                       AV_PIX_FMT_RGBA, 32)
         < 0) {
         if (reason) {
             *reason = QString::fromUtf8("can not allocate rgb frame buffer.");
@@ -137,17 +137,18 @@ AVContext *makeContext(const QString &url, QString *reason)
 DecoderThread::DecoderThread(QObject *viewerPrivate)
     : viewerPrivate(viewerPrivate)
     , state(AnimationViewer::NotParsed)
-    , frameBufferSize(30 * 10)
+    , frameBufferSize(10)
     , autoRepeat(false)
     , exiting(false)
-    , paused(false)
 {
 }
 
 void DecoderThread::run()
 {
+    bool ready = false;
     while (!isExiting()) {
         const Command &cmd = commands.get();
+        qCDebug(logger) << "got command:" << cmd.type << cmd.str_arg;
         switch (cmd.type) {
         case Command::Invalid:
             return;
@@ -161,19 +162,25 @@ void DecoderThread::run()
             QMetaObject::invokeMethod(viewerPrivate, "parsed", Q_ARG(int, state));
             break;
         case Command::Play:
-            if (state != AnimationViewer::ParseSuccess || paused) {
+        play:
+            if (state != AnimationViewer::ParseSuccess) {
+                qCDebug(logger) << "can not play: state=" << state;
                 break;
             }
+            ready = false;
             switch (play()) {
             case Finished:
-                Q_FALLTHROUGH();
+                qCDebug(logger) << "play finished.";
+                break;
             case Ready:
-                if (!viewerPrivate.isNull() && !frames.isEmpty())
-                    QMetaObject::invokeMethod(viewerPrivate.data(), "next");
+                qCDebug(logger) << "play ready.";
+                ready = true;
                 break;
             case Exit:
+                qCDebug(logger) << "play exit.";
                 return;
             case Error:
+                qCDebug(logger) << "play error.";
                 stop();
                 break;
             }
@@ -181,20 +188,23 @@ void DecoderThread::run()
         case Command::Stop:
             stop();
             break;
-        case Command::Pause:
-            paused = true;
-            break;
-        case Command::Resume:
-            paused = false;
-            commands.put(Command(Command::Play));
-            break;
         case Command::Seek:
             seek(cmd.int_arg1);
-            break;
+            if (ready) {
+                goto play;
+            } else {
+                break;
+            }
         case Command::Resize:
-            context->width = static_cast<int>(cmd.int_arg1);
-            context->height = static_cast<int>(cmd.int_arg2);
-            break;
+            if (context) {
+                context->width = static_cast<int>(cmd.int_arg1);
+                context->height = static_cast<int>(cmd.int_arg2);
+            }
+            if (ready) {
+                goto play;
+            } else {
+                break;
+            }
         default:
             qCWarning(logger) << "unknown command type:";
         }
@@ -256,6 +266,7 @@ DecoderThread::PlayResult DecoderThread::play()
             continue;
         }
         int r = avcodec_send_packet(context->codecCtx, packet.data());
+        qCDebug(logger) << "发送帧:" << r;
         if (r != 0) {
             if (r == AVERROR(EAGAIN)) {
                 qCWarning(logger) << "too much packet.";
@@ -273,15 +284,15 @@ DecoderThread::PlayResult DecoderThread::play()
             if (!commands.isEmpty()) {
                 return PlayResult::Ready;
             }
-            if (frames.size() >= frameBufferSize) {
+            if (frames.size() >= bsize) {
                 return PlayResult::Ready;
             }
 
             r = avcodec_receive_frame(context->codecCtx, context->nativeFrame);
+            qCDebug(logger) << "接收帧:" << r;
             if (r == AVERROR(EAGAIN)) {
                 break;
             } else if (r != 0) {
-                qCDebug(logger) << "can not decode frame.";
                 return PlayResult::Error;
             } else {  // r == 0
                 AVFrame *t;
@@ -298,7 +309,6 @@ DecoderThread::PlayResult DecoderThread::play()
                                       0, context->codecCtx->height, context->rgbFrame->data,
                                       context->rgbFrame->linesize);
                     if (h <= 0) {
-                        qCDebug(logger) << "can not scale frame.";
                         return PlayResult::Error;
                     }
 
@@ -307,11 +317,13 @@ DecoderThread::PlayResult DecoderThread::play()
                 QImage image(reinterpret_cast<const uchar *>(t->data[0]), t->width, t->height, t->linesize[0],
                              QImage::Format_RGBA8888_Premultiplied);
 
+                // 把 pts 转成以 ms 为单位，省事一些。
                 int64_t pts = static_cast<int64_t>(context->nativeFrame->pts * context->timeBase * 1000.0);
                 VideoFrame vf(image.copy(), pts, context->nativeFrame->pkt_dts);
                 if (isExiting()) {
                     return PlayResult::Exit;
                 }
+                qCDebug(logger) << "解压成功一个帧，放到队列里面。";
                 frames.put(vf);
             }
         }
@@ -322,7 +334,6 @@ void DecoderThread::stop()
 {
     state = AnimationViewer::NotParsed;
     context.reset();
-    paused = false;
 }
 
 void DecoderThread::seek(int64_t pts) { }
@@ -350,7 +361,7 @@ AnimationViewerPrivate::AnimationViewerPrivate(AnimationViewer *q)
     , thread(new DecoderThread(this))
     , playTime(0)
     , autoRepeat(true)
-    , pausedBeforeHidden(false)
+    , pausedBeforeHidden(true)
 {
 #if LIBAVFORMAT_VERSION_INT <= AV_VERSION_INT(58, 9, 100)
     static QAtomicInt registeredFormats(z0);
@@ -360,8 +371,9 @@ AnimationViewerPrivate::AnimationViewerPrivate(AnimationViewer *q)
 #endif
     connect(thread, &QThread::finished, thread, &QThread::deleteLater);
     thread->start();
-    timer.setSingleShot(true);
-    connect(&timer, SLOT(timeout()), this, SLOT(next()));
+    nextFrameTimer.setInterval(10);
+    nextFrameTimer.setSingleShot(false);
+    connect(&nextFrameTimer, SIGNAL(timeout()), this, SLOT(next()));
 }
 
 AnimationViewerPrivate::~AnimationViewerPrivate()
@@ -379,29 +391,49 @@ void AnimationViewerPrivate::parsed(int result)
 void AnimationViewerPrivate::next()
 {
     Q_Q(AnimationViewer);
-    VideoFrame f = thread->frames.peek();
-    if (!f.isValid()) {
+
+    BlockingQueue<VideoFrame> &frames = thread->frames;
+    if (frames.isEmpty()) {
+        qCDebug(logger) << "空队列，再等一会儿。";
         return;
     }
-    if (f.pts < playTime) {
-        timer.setInterval(f.pts - playTime);
-        timer.start();
-    } else {
-        thread->frames.get();
-        current = f.image;
-        VideoFrame n = thread->frames.peek();
-        if (n.isValid()) {
-            timer.setInterval(n.pts - playTime);
-            timer.start();
-        }
-        q->update();
-    }
-}
 
-void AnimationViewerPrivate::finished()
-{
-    Q_Q(AnimationViewer);
-    emit q->finished();
+    VideoFrame f;
+    while (true) {
+        f = frames.get();
+        if (!f.isValid()) {
+            qCDebug(logger) << "不正确的帧。";
+            q->stop();
+            return;
+        }
+        if (f.isFinished()) {
+            qCDebug(logger) << "播放结束。";
+            current = QImage();
+            q->update();
+            // XXX 未必需要停止，可以使用 seek() 返回到第 0 帧。
+            // q->stop();
+            emit q->finished();
+            return;
+        }
+        // 丢弃掉一直没有播放的帧，直接从最近一个帧开始播放。
+        // 一直读取到 frames 为空，或者下一帧的播放时间是 playTime 之后，或者下个帧是 EOF 帧
+        if (frames.isEmpty() || frames.peek().pts == 0 || frames.peek().pts > playTime) {
+            break;
+        }
+    }
+    qCDebug(logger) << "获得一个帧准备开始播放:" << f.pts << playTime;
+    if (f.pts > playTime) {
+        frames.returnsForcely(f);
+        playTime += nextFrameTimer.interval();
+        return;
+    }
+    playTime += nextFrameTimer.interval();
+    current = f.image;
+    q->update();
+    if (frames.isEmpty()) {
+        DecoderThread::Command cmd(DecoderThread::Command::Play);
+        thread->commands.put(cmd);
+    }
 }
 
 AnimationViewer::AnimationViewer(QWidget *parent)
@@ -420,6 +452,12 @@ QString AnimationViewer::url() const
 {
     Q_D(const AnimationViewer);
     return d->mediaUrl;
+}
+
+bool AnimationViewer::isPlaying() const
+{
+    Q_D(const AnimationViewer);
+    return d->nextFrameTimer.isActive();
 }
 
 void AnimationViewer::setUrl(const QString &url)
@@ -442,6 +480,8 @@ void AnimationViewer::play()
     Q_D(AnimationViewer);
     DecoderThread::Command cmd(DecoderThread::Command::Play);
     d->thread->commands.put(cmd);
+    d->playTime = 0;
+    d->nextFrameTimer.start();
 }
 
 void AnimationViewer::stop()
@@ -449,20 +489,23 @@ void AnimationViewer::stop()
     Q_D(AnimationViewer);
     DecoderThread::Command cmd(DecoderThread::Command::Stop);
     d->thread->commands.put(cmd);
+    d->playTime = 0;
+    d->nextFrameTimer.stop();
 }
 
 void AnimationViewer::pause()
 {
     Q_D(AnimationViewer);
-    DecoderThread::Command cmd(DecoderThread::Command::Pause);
-    d->thread->commands.put(cmd);
+    d->nextFrameTimer.stop();
 }
 
 void AnimationViewer::resume()
 {
     Q_D(AnimationViewer);
-    DecoderThread::Command cmd(DecoderThread::Command::Resume);
-    d->thread->commands.put(cmd);
+    if (d->thread->context.isNull()) {
+        return;
+    }
+    d->nextFrameTimer.start();
 }
 
 void AnimationViewer::setAutoRepeat(bool autoRepeat)
@@ -483,7 +526,11 @@ void AnimationViewer::paintEvent(QPaintEvent *event)
 {
     Q_D(AnimationViewer);
     QWidget::paintEvent(event);
+    if (d->current.isNull()) {
+        return;
+    }
     QPainter painter(this);
+    painter.drawImage(rect(), d->current);
 }
 
 void AnimationViewer::resizeEvent(QResizeEvent *event)
@@ -501,7 +548,7 @@ void AnimationViewer::hideEvent(QHideEvent *event)
 {
     Q_D(AnimationViewer);
     QWidget::hideEvent(event);
-    d->pausedBeforeHidden = d->thread->paused;
+    d->pausedBeforeHidden = d->nextFrameTimer.isActive();
     if (!d->pausedBeforeHidden) {
         pause();
     }

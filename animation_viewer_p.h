@@ -80,10 +80,8 @@ public:
             Parse = 1,
             Play = 2,
             Stop = 3,
-            Pause = 4,
-            Resume = 5,
-            Seek = 6,
-            Resize = 7,
+            Seek = 5,
+            Resize = 6,
         } type;
         QString str_arg;
         int64_t int_arg1;
@@ -120,7 +118,6 @@ public:
     QAtomicInteger<int> frameBufferSize;
     QAtomicInteger<bool> autoRepeat;
     QAtomicInteger<bool> exiting;
-    bool paused;
 };
 
 class AnimationViewerPrivate : public QObject
@@ -134,15 +131,13 @@ private slots:
     void parsed(int result);
     // 要求播放下一帧。不过具体啥时候播放还得另外说。
     void next();
-    // 播放已经结束了。
-    void finished();
 public:
     AnimationViewer * const q_ptr;
     DecoderThread *thread;
     QImage current;
     QString mediaUrl;
-    QTimer timer;
-    qint64 playTime;  // 当前播放的时间。in msecs
+    QTimer nextFrameTimer;
+    qint64 playTime;
     bool autoRepeat;
     bool pausedBeforeHidden;
 private:

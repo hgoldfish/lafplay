@@ -9,9 +9,9 @@ class AnimationViewer: public QWidget
     Q_OBJECT
 public:
     enum ParseResult {
-        ParseSuccess,
-        ParseFailed,
-        NotParsed,
+        ParseSuccess = 1,
+        ParseFailed = -1,
+        NotParsed = 0,
     };
 public:
     explicit AnimationViewer(QWidget *parent = nullptr);

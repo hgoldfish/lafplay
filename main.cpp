@@ -1,7 +1,7 @@
 #include <QtCore/qdebug.h>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/qmessagebox.h>
-#include "lafplay.h"
+#include "animation_viewer.h"
 
 int main(int argc, char *argv[])
 {
@@ -13,7 +13,7 @@ int main(int argc, char *argv[])
     AnimationViewer player;
     player.resize(1280, 720);
     player.show();
-    player.setFile(QString::fromLocal8Bit(argv[1]));
+    player.setUrl(QString::fromLocal8Bit(argv[1]));
     player.play();
     return app.exec();
 }
