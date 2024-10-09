@@ -1,119 +1,15 @@
-extern "C" {
-#include <libavformat/avformat.h>
-#include <libavutil/imgutils.h>
-#include <libswscale/swscale.h>
-}
+#include <QtCore/qloggingcategory.h>
+#include <QtGui/qpainter.h>
+#include "animation_viewer_p.h"
 
-#include "blocking_queue.h"
-#include "image_viewer_p.h"
-#include "animation_viewer.h"
-
-enum ParseResult {
-    ParseSuccess,
-    ParseFailed,
-    NotParsed,
-};
-
-class AVContext
-{
-public:
-    AVContext();
-    ~AVContext();
-public:
-    AVFormatContext *formatCtx;
-    AVCodecContext *codecCtx;
-    int videoStream;
-    double timeBase;
-};
-
-//class DecoderThread: public QThread
-//{
-//public:
-//    DecoderThread();
-//    virtual ~DecoderThread() override;
-//public:
-//    virtual void run() override;
-//public:
-//    ParseResult parse(const QString &filePath);
-//    void seek
-
-//};
-
-class DecoderThread;
-class AnimationViewerPrivate : public ImageViewerPrivate
-{
-    Q_OBJECT
-public:
-    AnimationViewerPrivate(AnimationViewer *q);
-    virtual ~AnimationViewerPrivate() override;
-public:
-    bool parseFile();
-    bool isPlaying();
-    void clearTherad();
-    void start();
-    void stop();
-    void resume();
-    void pause();
-private slots:
-    void updateProgress();
-    void emitFinished();
-public:
-    QScopedPointer<AVContext> context;
-    DecoderThread *thread;
-    QString filePath;
-    QTimer timer;
-    qint64 playTime;  // in msecs
-    ParseResult parseResult;
-    QAtomicInteger<bool> autoRepeat;
-private:
-    Q_DECLARE_PUBLIC(AnimationViewer)
-};
-
-class VideoFrame
-{
-public:
-    VideoFrame(const QImage &image, int64_t pts, int64_t dts)
-        : image(image)
-        , pts(pts)
-        , dts(dts)
-    {
-    }
-    VideoFrame(const VideoFrame &other)
-        : image(other.image)
-        , pts(other.pts)
-        , dts(other.dts)
-    {
-    }
-    VideoFrame()
-        : pts(-1)
-        , dts(-1)
-    {
-    }
-public:
-    bool isValid() const { return pts >= 0 && dts >= 0; }
-public:
-    QImage image;
-    int64_t pts;
-    int64_t dts;
-};
-
-class DecoderThread : public QThread
-{
-public:
-    DecoderThread(AVContext *context);
-    virtual void run() override;
-public:
-    void stop();
-    bool isExiting() const;
-public:
-    QScopedPointer<AVContext> context;
-    BlockingQueue<VideoFrame> queue;
-    QAtomicInt exiting;
-};
+Q_LOGGING_CATEGORY(logger, "lafplay.ffmpeg")
 
 AVContext::AVContext()
     : formatCtx(nullptr)
     , codecCtx(nullptr)
+    , swsContext(nullptr)
+    , nativeFrame(nullptr)
+    , rgbFrame(nullptr)
     , videoStream(0)
     , timeBase(0.001)
 {
@@ -121,6 +17,18 @@ AVContext::AVContext()
 
 AVContext::~AVContext()
 {
+    if (rgbFrame) {
+        if (rgbFrame->data[0]) {
+            av_freep(&rgbFrame->data[0]);
+        }
+        av_frame_free(&rgbFrame);
+    }
+    if (nativeFrame) {
+        av_frame_free(&nativeFrame);
+    }
+    if (swsContext) {
+        sws_freeContext(swsContext);
+    }
     if (codecCtx) {
         avcodec_free_context(&codecCtx);
     }
@@ -129,317 +37,276 @@ AVContext::~AVContext()
     }
 }
 
-AnimationViewerPrivate::AnimationViewerPrivate(AnimationViewer *q)
-    : ImageViewerPrivate(q)
-    , thread(nullptr)
-    , playTime(0)
-    , parseResult(NotParsed)
-    , autoRepeat(false)
+bool AVContext::initSwsContext()
 {
-#if LIBAVFORMAT_VERSION_INT <= AV_VERSION_INT(58, 9, 100)
-    static QAtomicInt registeredFormats(z0);
-    if (!registeredFormats.fetchAndAddRelaxed(1)) {
-        av_register_all();
-    }
-#endif
-    timer.setInterval(5);
-    timer.setSingleShot(false);
-    connect(&timer, SIGNAL(timeout()), SLOT(updateProgress()));
-}
-
-AnimationViewerPrivate::~AnimationViewerPrivate()
-{
-    stop();
-}
-
-bool AnimationViewerPrivate::parseFile()
-{
-    if (filePath.isEmpty()) {
-        return false;
-    }
-    if (parseResult == ParseSuccess) {
+    if (swsContext) {
         return true;
-    } else if (parseResult == ParseFailed) {
+    }
+    AVPixelFormat orignalFormat;
+    switch (codecCtx->pix_fmt) {
+    // 这一段代码是干啥用的？
+    case AV_PIX_FMT_YUVJ420P:
+        orignalFormat = AV_PIX_FMT_YUV420P;
+        break;
+    case AV_PIX_FMT_YUVJ422P:
+        orignalFormat = AV_PIX_FMT_YUV422P;
+        break;
+    case AV_PIX_FMT_YUVJ444P:
+        orignalFormat = AV_PIX_FMT_YUV444P;
+        break;
+    case AV_PIX_FMT_YUVJ440P:
+        orignalFormat = AV_PIX_FMT_YUV440P;
+        break;
+    default:
+        orignalFormat = codecCtx->pix_fmt;
+        break;
+    }
+    swsContext = sws_getContext(codecCtx->width, codecCtx->height, orignalFormat, codecCtx->width, codecCtx->height,
+                                AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!swsContext) {
+        qCWarning(logger) << "can not allocate sws context.";
         return false;
     }
+    return true;
+}
 
+AVContext *makeContext(const QString &url, QString *reason)
+{
     QScopedPointer<AVContext> tmpAvContext(new AVContext());
-    if (int ret = avformat_open_input(&tmpAvContext->formatCtx, qPrintable(filePath), nullptr, nullptr)) {
-        qDebug() << "can not open file." << ret;
-        parseResult = ParseFailed;
+    if (int ret = avformat_open_input(&tmpAvContext->formatCtx, qPrintable(url), nullptr, nullptr)) {
+        if (reason) {
+            *reason = QString::fromUtf8("can not open file: %1").arg(ret);
+        }
         tmpAvContext->formatCtx = nullptr;
-        return false;
+        return nullptr;
     }
 
     tmpAvContext->videoStream = av_find_best_stream(tmpAvContext->formatCtx, AVMEDIA_TYPE_VIDEO, 0, 0, nullptr, 0);
     if (tmpAvContext->videoStream < 0) {
-        parseResult = ParseFailed;
-        return false;
+        if (reason) {
+            *reason = QString::fromUtf8("can not find video stream.");
+        }
+        return nullptr;
     }
 
     AVStream *stream = tmpAvContext->formatCtx->streams[tmpAvContext->videoStream];
     AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec) {
-        qDebug() << "can not find codec.";
-        parseResult = ParseFailed;
-        return false;
+        if (reason) {
+            *reason = QString::fromUtf8("can not find codec.");
+        }
+        return nullptr;
     }
     tmpAvContext->codecCtx = avcodec_alloc_context3(codec);
     if (!tmpAvContext->codecCtx) {
-        qDebug() << "can not allocate codec context.";
-        parseResult = ParseFailed;
-        return false;
+        if (reason) {
+            *reason = QString::fromUtf8("can not allocate codec context.");
+        }
+        return nullptr;
     }
     if (avcodec_parameters_to_context(tmpAvContext->codecCtx, stream->codecpar) < 0) {
-        qDebug() << "can not set parameters to codec context.";
-        parseResult = ParseFailed;
-        return false;
+        if (reason) {
+            *reason = QString::fromUtf8("can not set parameters to codec context.");
+        }
+        return nullptr;
     }
     if (avcodec_open2(tmpAvContext->codecCtx, nullptr, nullptr)) {
-        qDebug() << "can not open codec context.";
-        parseResult = ParseFailed;
-        return false;
+        if (reason) {
+            *reason = QString::fromUtf8("can not open codec context.");
+        }
+        return nullptr;
     }
+    tmpAvContext->nativeFrame = av_frame_alloc();
+    AVFrame *rgbFrame = av_frame_alloc();
+    tmpAvContext->rgbFrame = rgbFrame;
+    if (av_image_alloc(rgbFrame->data, rgbFrame->linesize, tmpAvContext->codecCtx->width,
+                       tmpAvContext->codecCtx->height, AV_PIX_FMT_RGBA, 32)
+        < 0) {
+        if (reason) {
+            *reason = QString::fromUtf8("can not allocate rgb frame buffer.");
+        }
+        return nullptr;
+    }
+    tmpAvContext->width = rgbFrame->width = tmpAvContext->codecCtx->width;
+    tmpAvContext->height = rgbFrame->height = tmpAvContext->codecCtx->height;
+    rgbFrame->format = AV_PIX_FMT_RGBA;
     tmpAvContext->timeBase = av_q2d(stream->time_base);
-    parseResult = ParseSuccess;
-    qSwap(this->context, tmpAvContext);
+    return tmpAvContext.take();
+}
+
+DecoderThread::DecoderThread(QObject *viewerPrivate)
+    : viewerPrivate(viewerPrivate)
+    , state(AnimationViewer::NotParsed)
+    , frameBufferSize(30 * 10)
+    , autoRepeat(false)
+    , exiting(false)
+    , paused(false)
+{
+}
+
+void DecoderThread::run()
+{
+    while (!isExiting()) {
+        const Command &cmd = commands.get();
+        switch (cmd.type) {
+        case Command::Invalid:
+            return;
+        case Command::Parse:
+            state = AnimationViewer::NotParsed;
+            if (parse(cmd.str_arg)) {
+                state = AnimationViewer::ParseSuccess;
+            } else {
+                state = AnimationViewer::ParseFailed;
+            }
+            QMetaObject::invokeMethod(viewerPrivate, "parsed", Q_ARG(int, state));
+            break;
+        case Command::Play:
+            if (state != AnimationViewer::ParseSuccess || paused) {
+                break;
+            }
+            switch (play()) {
+            case Finished:
+                Q_FALLTHROUGH();
+            case Ready:
+                if (!viewerPrivate.isNull() && !frames.isEmpty())
+                    QMetaObject::invokeMethod(viewerPrivate.data(), "next");
+                break;
+            case Exit:
+                return;
+            case Error:
+                stop();
+                break;
+            }
+            break;
+        case Command::Stop:
+            stop();
+            break;
+        case Command::Pause:
+            paused = true;
+            break;
+        case Command::Resume:
+            paused = false;
+            commands.put(Command(Command::Play));
+            break;
+        case Command::Seek:
+            seek(cmd.int_arg1);
+            break;
+        case Command::Resize:
+            context->width = static_cast<int>(cmd.int_arg1);
+            context->height = static_cast<int>(cmd.int_arg2);
+            break;
+        default:
+            qCWarning(logger) << "unknown command type:";
+        }
+    }
+}
+
+bool DecoderThread::parse(const QString &url)
+{
+    Q_ASSERT(!url.isEmpty() && state == AnimationViewer::NotParsed);
+    QString reason;
+    AVContext *context = makeContext(url, &reason);
+    if (!context) {
+        qCDebug(logger) << reason;
+        return false;
+    } else {
+        this->context.reset(context);
+    }
     return true;
 }
-
-bool AnimationViewerPrivate::isPlaying()
-{
-    return thread && !thread->isExiting() && thread->isRunning();
-}
-
-void AnimationViewerPrivate::updateProgress()
-{
-    Q_Q(AnimationViewer);
-    if (isPlaying()) {
-        playTime += timer.interval();
-        // thread 不从属于 AnimationViewerPrivate，太容易在删除后访问搞出野指针了。
-        const VideoFrame &vf = thread->queue.peek();
-        if (vf.isValid() && vf.pts <= playTime) {
-            thread->queue.get();
-            q->ImageViewer::setImage(vf.image);
-        }
-    } else {
-        timer.stop();
-        emitFinished();
-    }
-}
-
-void AnimationViewerPrivate::start()
-{
-    if (thread || playTime || timer.isActive()) {
-        qWarning("start() must called in stop state.");
-        return;
-    }
-    if (context.isNull()) {
-        qWarning("the file is not parsed, can not start.");
-        return;
-    }
-    Q_ASSERT(parseResult == ParseSuccess);
-    Q_ASSERT(!thread);
-    thread = new DecoderThread(context.take());
-    parseResult = NotParsed;
-    thread->start();
-    playTime = 0;
-    timer.start();
-}
-
-void AnimationViewerPrivate::stop()
-{
-    if (thread) {
-        thread->stop();
-        thread->wait();
-        delete thread;
-        thread = nullptr;
-        playTime = 0;
-        timer.stop();
-    } else {
-        Q_ASSERT(playTime == 0);
-        Q_ASSERT(!timer.isActive());
-    }
-}
-
-void AnimationViewerPrivate::resume()
-{
-    if (!isPlaying()) {
-        return;
-    }
-    timer.start();
-}
-
-void AnimationViewerPrivate::pause()
-{
-    if (!isPlaying()) {
-        return;
-    }
-    timer.stop();
-}
-
-void AnimationViewerPrivate::emitFinished()
-{
-    Q_Q(AnimationViewer);
-    stop();
-    emit q->finished();
-}
-
-DecoderThread::DecoderThread(AVContext *context)
-    : context(context)
-    , queue(5)
-    , exiting(false)
-{
-    Q_ASSERT(context != nullptr);
-    // connect(this, &QThread::finished, this, &QObject::deleteLater);
-}
-
-struct ScopedPointerNativeFrameDeleter
-{
-    static inline void cleanup(AVFrame *&pointer) { av_frame_free(&pointer); }
-};
-
-struct ScopedPointerRgbFrameDeleter
-{
-    static inline void cleanup(AVFrame *&pointer)
-    {
-        if (pointer->data[0]) {
-            av_freep(&pointer->data[0]);
-        }
-        av_frame_free(&pointer);
-    }
-};
 
 struct ScopedPointerAvPacketDeleter
 {
     static inline void cleanup(AVPacket *&pointer) { av_packet_free(&pointer); }
 };
 
-struct ScopedPointerSwsContextDeleter
+DecoderThread::PlayResult DecoderThread::play()
 {
-    static inline void cleanup(SwsContext *pointer) { sws_freeContext(pointer); }
-};
+    Q_ASSERT(!context.isNull() && context->isValid());
 
-void DecoderThread::run()
-{
-    if (isExiting())
-        return;
-
-    if (!context || !context->formatCtx || !context->codecCtx) {
-        return;
-    }
-
-    QScopedPointer<AVFrame, ScopedPointerNativeFrameDeleter> nativeFrame(av_frame_alloc());
-    QScopedPointer<AVFrame, ScopedPointerRgbFrameDeleter> rgbFrame(av_frame_alloc());
-    if (av_image_alloc(rgbFrame->data, rgbFrame->linesize, context->codecCtx->width, context->codecCtx->height,
-                       AV_PIX_FMT_RGBA, 32)
-        < 0) {
-        qDebug() << "can not allocate frame buffer.";
-        return;
-    }
-    rgbFrame->width = context->codecCtx->width;
-    rgbFrame->height = context->codecCtx->height;
-    rgbFrame->format = AV_PIX_FMT_RGBA;
-
-    QScopedPointer<SwsContext, ScopedPointerSwsContextDeleter> swsCtx;
-
+    // 优先处理命令，如果没有命令，则主要去读数据。
     while (true) {
-        if (isExiting())
-            return;
-
+        if (isExiting()) {
+            return PlayResult::Exit;
+        }
+        if (!commands.isEmpty()) {
+            return PlayResult::Ready;
+        }
+        if (frames.size() >= frameBufferSize) {
+            return PlayResult::Ready;
+        }
         QScopedPointer<AVPacket, ScopedPointerAvPacketDeleter> packet(av_packet_alloc());
         if (av_read_frame(context->formatCtx, packet.data())) {
-            return;
+            frames.put(VideoFrame::makeFinishedFrame());
+            return PlayResult::Finished;
         }
 
-        if (isExiting())
-            return;
+        if (isExiting()) {
+            return PlayResult::Exit;
+        }
+
+        // 跳过音频等等。。
         if (packet->stream_index != context->videoStream) {
             continue;
         }
-
-        if (isExiting())
-            return;
-
-        Q_ASSERT(context->codecCtx);
         int r = avcodec_send_packet(context->codecCtx, packet.data());
         if (r != 0) {
             if (r == AVERROR(EAGAIN)) {
-                qDebug() << "too much packet.";
+                qCWarning(logger) << "too much packet.";
             } else {
-                qDebug() << "can not send packet.";
+                qCWarning(logger) << "can not send packet.";
             }
-            return;
+            return PlayResult::Error;
         }
 
+        // 上面已经丢了一些帧进去，把所有数据都解码出来再处理其它事。
         while (true) {
-            if (isExiting())
-                return;
-            Q_ASSERT(context->codecCtx);
-            r = avcodec_receive_frame(context->codecCtx, nativeFrame.data());
+            if (isExiting()) {
+                return PlayResult::Exit;
+            }
+            if (!commands.isEmpty()) {
+                return PlayResult::Ready;
+            }
+            if (frames.size() >= frameBufferSize) {
+                return PlayResult::Ready;
+            }
+
+            r = avcodec_receive_frame(context->codecCtx, context->nativeFrame);
             if (r == AVERROR(EAGAIN)) {
                 break;
             } else if (r != 0) {
-                qDebug() << "can not decode frame.";
-                return;
-            } else {
+                qCDebug(logger) << "can not decode frame.";
+                return PlayResult::Error;
+            } else {  // r == 0
                 AVFrame *t;
                 if (context->codecCtx->pix_fmt == AV_PIX_FMT_RGBA) {
-                    t = nativeFrame.data();
+                    t = context->nativeFrame;
                 } else {
-                    if (!swsCtx) {
-                        AVPixelFormat orignalFormat;
-                        switch (context->codecCtx->pix_fmt) {
-                        case AV_PIX_FMT_YUVJ420P:
-                            orignalFormat = AV_PIX_FMT_YUV420P;
-                            break;
-                        case AV_PIX_FMT_YUVJ422P:
-                            orignalFormat = AV_PIX_FMT_YUV422P;
-                            break;
-                        case AV_PIX_FMT_YUVJ444P:
-                            orignalFormat = AV_PIX_FMT_YUV444P;
-                            break;
-                        case AV_PIX_FMT_YUVJ440P:
-                            orignalFormat = AV_PIX_FMT_YUV440P;
-                            break;
-                        default:
-                            orignalFormat = context->codecCtx->pix_fmt;
-                            break;
-                        }
-                        if (isExiting())
-                            return;
-                        swsCtx.reset(sws_getContext(context->codecCtx->width, context->codecCtx->height, orignalFormat,
-                                                    context->codecCtx->width, context->codecCtx->height,
-                                                    AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr));
-                        if (!swsCtx) {
-                            qDebug() << "can not allocate sws context.";
-                            return;
-                        }
+                    if (!context->initSwsContext()) {
+                        return PlayResult::Error;
+                    }
+                    if (isExiting()) {
+                        return PlayResult::Exit;
+                    }
+                    int h = sws_scale(context->swsContext, context->nativeFrame->data, context->nativeFrame->linesize,
+                                      0, context->codecCtx->height, context->rgbFrame->data,
+                                      context->rgbFrame->linesize);
+                    if (h <= 0) {
+                        qCDebug(logger) << "can not scale frame.";
+                        return PlayResult::Error;
                     }
 
-                    if (isExiting())
-                        return;
-                    int h = sws_scale(swsCtx.data(), nativeFrame->data, nativeFrame->linesize, 0,
-                                      context->codecCtx->height, rgbFrame->data, rgbFrame->linesize);
-                    if (h <= 0) {
-                        qDebug() << "can not scale frame.";
-                        return;
-                    }
-                    //                rgbFrame->pts = nativeFrame->pts;
-                    //                rgbFrame->color_trc = nativeFrame->color_trc;
-                    //                rgbFrame->key_frame = nativeFrame->key_frame;
-                    //                rgbFrame->pict_type = nativeFrame->pict_type;
-                    //                rgbFrame->color_range = nativeFrame->color_range;
-                    t = rgbFrame.data();
+                    t = context->rgbFrame;
                 }
                 QImage image(reinterpret_cast<const uchar *>(t->data[0]), t->width, t->height, t->linesize[0],
                              QImage::Format_RGBA8888_Premultiplied);
 
-                int64_t pts = static_cast<int64_t>(nativeFrame->pts * context->timeBase * 1000.0);
-                VideoFrame vf(image.copy(), pts, nativeFrame->pkt_dts);
-                if (isExiting())
-                    return;
-                queue.put(vf);
+                int64_t pts = static_cast<int64_t>(context->nativeFrame->pts * context->timeBase * 1000.0);
+                VideoFrame vf(image.copy(), pts, context->nativeFrame->pkt_dts);
+                if (isExiting()) {
+                    return PlayResult::Exit;
+                }
+                frames.put(vf);
             }
         }
     }
@@ -447,12 +314,20 @@ void DecoderThread::run()
 
 void DecoderThread::stop()
 {
+    state = AnimationViewer::NotParsed;
+    context.reset();
+    paused = false;
+}
+
+void DecoderThread::seek(int64_t pts) { }
+
+void DecoderThread::shutdown()
+{
 #if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
-    exiting.storeRelaxed(true);
+    return exiting.storeRelease(true);
 #else
-    exiting.store(true);
+    return exiting.store(true);
 #endif
-    queue.clear();
 }
 
 bool DecoderThread::isExiting() const
@@ -464,189 +339,190 @@ bool DecoderThread::isExiting() const
 #endif
 }
 
-AnimationViewer::AnimationViewer(QWidget *parent)
-    : ImageViewer(parent, new AnimationViewerPrivate(this))
+AnimationViewerPrivate::AnimationViewerPrivate(AnimationViewer *q)
+    : q_ptr(q)
+    , thread(new DecoderThread(this))
+    , playTime(0)
+    , autoRepeat(true)
+    , pausedBeforeHidden(false)
 {
+#if LIBAVFORMAT_VERSION_INT <= AV_VERSION_INT(58, 9, 100)
+    static QAtomicInt registeredFormats(z0);
+    if (!registeredFormats.fetchAndAddRelaxed(1)) {
+        av_register_all();
+    }
+#endif
+    connect(thread, &QThread::finished, thread, &QThread::deleteLater);
+    thread->start();
+    timer.setSingleShot(true);
+    connect(&timer, SLOT(timeout()), this, SLOT(next()));
 }
 
-AnimationViewer::~AnimationViewer() { }
+AnimationViewerPrivate::~AnimationViewerPrivate()
+{
+    thread->shutdown();
+    thread = nullptr;
+}
+
+void AnimationViewerPrivate::parsed(int result)
+{
+    Q_Q(AnimationViewer);
+    emit q->parsed(static_cast<AnimationViewer::ParseResult>(result));
+}
+
+void AnimationViewerPrivate::next()
+{
+    Q_Q(AnimationViewer);
+    VideoFrame f = thread->frames.peek();
+    if (!f.isValid()) {
+        return;
+    }
+    if (f.pts < playTime) {
+        timer.setInterval(f.pts - playTime);
+        timer.start();
+    } else {
+        thread->frames.get();
+        current = f.image;
+        VideoFrame n = thread->frames.peek();
+        if (n.isValid()) {
+            timer.setInterval(n.pts - playTime);
+            timer.start();
+        }
+        q->update();
+    }
+}
+
+void AnimationViewerPrivate::finished()
+{
+    Q_Q(AnimationViewer);
+    emit q->finished();
+}
+
+AnimationViewer::AnimationViewer(QWidget *parent)
+    : QWidget(parent)
+    , dd_ptr(new AnimationViewerPrivate(this))
+{
+    connect(this, &AnimationViewer::finished, this, &AnimationViewer::play);
+}
+
+AnimationViewer::~AnimationViewer()
+{
+    delete dd_ptr;
+}
+
+QString AnimationViewer::url() const
+{
+    Q_D(const AnimationViewer);
+    return d->mediaUrl;
+}
+
+bool AnimationViewer::setUrl(const QString &url)
+{
+    Q_D(AnimationViewer);
+    d->mediaUrl = url;
+    DecoderThread::Command cmd(DecoderThread::Command::Parse);
+    cmd.str_arg = url;
+    d->thread->commands.put(cmd);
+}
 
 bool AnimationViewer::play()
 {
     Q_D(AnimationViewer);
-    if (d->isPlaying()) {
-        d->timer.start();
-        return true;
-    }
-    Q_ASSERT(!d->thread);
-    if (!d->parseFile()) {
-        return false;
-    }
-    d->start();
-    return true;
+    DecoderThread::Command cmd(DecoderThread::Command::Play);
+    d->thread->commands.put(cmd);
 }
 
 void AnimationViewer::stop()
 {
     Q_D(AnimationViewer);
-    d->stop();
+    DecoderThread::Command cmd(DecoderThread::Command::Stop);
+    d->thread->commands.put(cmd);
 }
 
 void AnimationViewer::pause()
 {
     Q_D(AnimationViewer);
-    d->pause();
+    DecoderThread::Command cmd(DecoderThread::Command::Pause);
+    d->thread->commands.put(cmd);
+}
+
+void AnimationViewer::resume()
+{
+    Q_D(AnimationViewer);
+    DecoderThread::Command cmd(DecoderThread::Command::Resume);
+    d->thread->commands.put(cmd);
 }
 
 void AnimationViewer::setAutoRepeat(bool autoRepeat)
 {
     Q_D(AnimationViewer);
+    if (d->autoRepeat == autoRepeat) {
+        return;
+    }
     d->autoRepeat = autoRepeat;
     if (autoRepeat) {
-        connect(this, SIGNAL(finished()), SLOT(play()), Qt::QueuedConnection);
+        connect(this, &AnimationViewer::finished, this, &AnimationViewer::play);
     } else {
-        disconnect(this, SIGNAL(finished()), this, SLOT(play()));
+        disconnect(this, &AnimationViewer::finished, this, &AnimationViewer::play);
     }
 }
 
-bool AnimationViewer::setFile(const QString &filePath)
+void AnimationViewer::paintEvent(QPaintEvent *event)
 {
     Q_D(AnimationViewer);
-    d->stop();
-    QImageReader reader(filePath);
-    if (reader.canRead() && !reader.supportsAnimation()) {
-        // static image.
-        return ImageViewer::setFile(filePath);
-    } else {
-        if (d->filePath == filePath) {
-            if (d->parseResult == ParseSuccess) {
-                return true;
-            } else if (d->parseResult == ParseFailed) {
-                return false;
-            }
-        } else {
-            d->filePath = filePath;
-            d->parseResult = NotParsed;
-        }
-        if (!d->parseFile()) {
-            return false;
-        }
-        d->start();
-        if (!isVisible()) {
-            d->pause();
-        }
-        return true;
-    }
+    QWidget::paintEvent(event);
+    QPainter painter(this);
 }
 
-QString AnimationViewer::imagePath()
+void AnimationViewer::resizeEvent(QResizeEvent *event)
 {
     Q_D(AnimationViewer);
-    if (d->filePath.isEmpty()) {
-        return ImageViewer::imagePath();
-    } else {
-        return d->filePath;
-    }
+    QWidget::resizeEvent(event);
+    QSize s = this->size();
+    DecoderThread::Command cmd(DecoderThread::Command::Resize);
+    cmd.int_arg1 = s.width();
+    cmd.int_arg2 = s.height();
+    d->thread->commands.put(cmd);
 }
 
 void AnimationViewer::hideEvent(QHideEvent *event)
 {
     Q_D(AnimationViewer);
-    ImageViewer::hideEvent(event);
-    d->pause();
+    QWidget::hideEvent(event);
+    d->pausedBeforeHidden = d->thread->paused;
+    if (!d->pausedBeforeHidden) {
+        pause();
+    }
 }
-
 void AnimationViewer::showEvent(QShowEvent *event)
 {
     Q_D(AnimationViewer);
-    ImageViewer::showEvent(event);
-    d->resume();
+    QWidget::showEvent(event);
+    if (!d->pausedBeforeHidden) {
+        resume();
+    }
 }
-
-struct ScopedPointerAVFormatContextDeleter
-{
-    static inline void cleanup(AVFormatContext *&pointer) { avformat_close_input(&pointer); }
-};
-
-struct ScopedPointerAVCodecContextDeleter
-{
-    static inline void cleanup(AVCodecContext *&pointer) { avcodec_free_context(&pointer); }
-};
 
 QList<QImage> convertVideoToImages(const QString &filePath, QString *reason)
 {
-    AVFormatContext *tContext = nullptr;
-    if (avformat_open_input(&tContext, qPrintable(filePath), nullptr, nullptr)) {
-        if (reason) {
-            *reason = QString::fromUtf8("can not open video file: %1").arg(filePath);
-        }
+    QScopedPointer<AVContext> context(makeContext(filePath, reason));
+    if (!context) {
+        if (reason)
+            qCDebug(logger) << *reason;
         return QList<QImage>();
     }
-    QScopedPointer<AVFormatContext, ScopedPointerAVFormatContextDeleter> context(tContext);
-
-    int videoStream = av_find_best_stream(context.data(), AVMEDIA_TYPE_VIDEO, 0, 0, nullptr, 0);
-    if (videoStream < 0) {
-        if (reason) {
-            *reason = QString::fromUtf8("no video stream found.");
-        }
-        return QList<QImage>();
-    }
-
-    AVStream *stream = context->streams[videoStream];
-    AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
-    if (!codec) {
-        if (reason) {
-            *reason = QString::fromUtf8("can not find codec.");
-        }
-        return QList<QImage>();
-    }
-
-    QScopedPointer<AVCodecContext, ScopedPointerAVCodecContextDeleter> codecCtx(avcodec_alloc_context3(codec));
-    if (!codecCtx) {
-        if (reason) {
-            *reason = QString::fromUtf8("can not allocate codec context.");
-        }
-        return QList<QImage>();
-    }
-    if (avcodec_parameters_to_context(codecCtx.data(), stream->codecpar) < 0) {
-        if (reason) {
-            *reason = QString::fromUtf8("can not set parameters to codec context.");
-        }
-        return QList<QImage>();
-    }
-    if (avcodec_open2(codecCtx.data(), nullptr, nullptr)) {
-        if (reason) {
-            *reason = QString::fromUtf8("can not open codec context.");
-        }
-        return QList<QImage>();
-    }
-
-    QScopedPointer<AVFrame, ScopedPointerNativeFrameDeleter> nativeFrame(av_frame_alloc());
-    QScopedPointer<AVFrame, ScopedPointerRgbFrameDeleter> rgbFrame(av_frame_alloc());
-    if (av_image_alloc(rgbFrame->data, rgbFrame->linesize, codecCtx->width, codecCtx->height, AV_PIX_FMT_RGBA, 32)
-        < 0) {
-        if (reason) {
-            *reason = QString::fromUtf8("can not allocate frame buffer.");
-        }
-        return QList<QImage>();
-    }
-    rgbFrame->width = codecCtx->width;
-    rgbFrame->height = codecCtx->height;
-    rgbFrame->format = AV_PIX_FMT_RGBA;
-
-    QScopedPointer<SwsContext, ScopedPointerSwsContextDeleter> swsCtx;
 
     QList<QImage> frames;
     while (true) {
         QScopedPointer<AVPacket, ScopedPointerAvPacketDeleter> packet(av_packet_alloc());
-        if (av_read_frame(context.data(), packet.data())) {
+        if (av_read_frame(context->formatCtx, packet.data())) {
             return frames;
         }
-        if (packet->stream_index != videoStream) {
+        if (packet->stream_index != context->videoStream) {
             continue;
         }
 
-        int r = avcodec_send_packet(codecCtx.data(), packet.data());
+        int r = avcodec_send_packet(context->codecCtx, packet.data());
         if (r != 0) {
             if (r == AVERROR(EAGAIN)) {
                 if (reason) {
@@ -661,7 +537,7 @@ QList<QImage> convertVideoToImages(const QString &filePath, QString *reason)
         }
 
         while (true) {
-            r = avcodec_receive_frame(codecCtx.data(), nativeFrame.data());
+            r = avcodec_receive_frame(context->codecCtx, context->nativeFrame);
             if (r == AVERROR(EAGAIN)) {
                 break;
             } else if (r != 0) {
@@ -670,45 +546,25 @@ QList<QImage> convertVideoToImages(const QString &filePath, QString *reason)
                 }
                 return QList<QImage>();
             } else {
-                if (!swsCtx) {
-                    AVPixelFormat orignalFormat;
-                    switch (codecCtx->pix_fmt) {
-                    case AV_PIX_FMT_YUVJ420P:
-                        orignalFormat = AV_PIX_FMT_YUV420P;
-                        break;
-                    case AV_PIX_FMT_YUVJ422P:
-                        orignalFormat = AV_PIX_FMT_YUV422P;
-                        break;
-                    case AV_PIX_FMT_YUVJ444P:
-                        orignalFormat = AV_PIX_FMT_YUV444P;
-                        break;
-                    case AV_PIX_FMT_YUVJ440P:
-                        orignalFormat = AV_PIX_FMT_YUV440P;
-                        break;
-                    default:
-                        orignalFormat = codecCtx->pix_fmt;
-                        break;
-                    }
-                    swsCtx.reset(sws_getContext(codecCtx->width, codecCtx->height, orignalFormat, codecCtx->width,
-                                                codecCtx->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr,
-                                                nullptr));
-                    if (!swsCtx) {
-                        if (reason) {
-                            *reason = QString::fromUtf8("can not create software scale context.");
-                        }
-                        return QList<QImage>();
-                    }
-                }
-                int h = sws_scale(swsCtx.data(), nativeFrame->data, nativeFrame->linesize, 0, codecCtx->height,
-                                  rgbFrame->data, rgbFrame->linesize);
+                context->initSwsContext();
+                int h = sws_scale(context->swsContext, context->nativeFrame->data, context->nativeFrame->linesize, 0,
+                                  context->codecCtx->height, context->rgbFrame->data, context->rgbFrame->linesize);
                 if (h <= 0) {
                     if (reason) {
                         *reason = QString::fromUtf8("can not scale frame.");
                     }
                     return QList<QImage>();
                 }
-                QImage image(static_cast<const uchar *>(rgbFrame->data[0]), nativeFrame->width, nativeFrame->height,
-                             rgbFrame->linesize[0], QImage::Format_RGBA8888_Premultiplied);
+                // 理论上复制 nativeFrame 的数据到 rgbFrame，但实际上我们并不使用 rgbFrame，而是过度一下，丢到
+                // VideoFrame 里面。 所以我们这里就复制了。
+                // rgbFrame->pts = nativeFrame->pts;
+                // rgbFrame->color_trc = nativeFrame->color_trc;
+                // rgbFrame->key_frame = nativeFrame->key_frame;
+                // rgbFrame->pict_type = nativeFrame->pict_type;
+                // rgbFrame->color_range = nativeFrame->color_range;
+                QImage image(static_cast<const uchar *>(context->rgbFrame->data[0]), context->nativeFrame->width,
+                             context->nativeFrame->height, context->rgbFrame->linesize[0],
+                             QImage::Format_RGBA8888_Premultiplied);
                 if (!image.isNull()) {
                     frames.append(image.copy());
                 }

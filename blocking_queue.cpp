@@ -6,36 +6,32 @@ class EventPrivate
 {
 public:
     EventPrivate();
-    inline void incref();
-    inline bool decref();
+    void set();
     bool wait(unsigned long time);
 public:
     QWaitCondition condition;
     QMutex mutex;
-    QAtomicInteger<bool> flag;
+    QAtomicInteger<bool > flag;
     QAtomicInteger<int> ref;
     QAtomicInteger<quint32> waiters;
 };
 
 EventPrivate::EventPrivate()
     : flag(false)
-    , ref(1)
     , waiters(0)
 {
 }
 
-void EventPrivate::incref()
+void EventPrivate::set()
 {
-    ref.ref();
-}
-
-bool EventPrivate::decref()
-{
-    if (!ref.deref()) {
-        delete this;
-        return false;
+    // already set true. do nothing.
+    if (flag.fetchAndStoreAcquire(true)) {
+        return;
     }
-    return true;
+    // the flag is changed, wake all waiters.
+    if (waiters.loadAcquire() > 0) {
+        condition.wakeAll();
+    }
 }
 
 bool EventPrivate::wait(unsigned long time)
@@ -45,16 +41,14 @@ bool EventPrivate::wait(unsigned long time)
         return f;
     }
 
-    incref();
     mutex.lock();
     Q_ASSERT(!f);
     ++waiters;
-    while (!(f = flag.loadAcquire()) && ref.loadAcquire() > 1) {
+    while (!(f = flag.loadAcquire())) {
         condition.wait(&mutex);
     }
     --waiters;
     mutex.unlock();
-    decref();
     return f;
 }
 
@@ -65,56 +59,37 @@ Event::Event()
 
 Event::~Event()
 {
-    if (d->decref()) {
-        d->condition.wakeAll();
-    }
-    d = nullptr;
+    d->condition.wakeAll();
+    // the last user delete it.
+    d.clear();
 }
 
 void Event::set()
 {
-    if (d) {
-        if (d->flag.fetchAndStoreAcquire(true)) {
-            return;
-        }
-        d->incref();
-        if (d->waiters.loadAcquire() > 0) {
-            d->condition.wakeAll();
-        }
-        d->decref();
-    }
+    QSharedPointer<EventPrivate> d = this->d;
+    d->set();
 }
 
 void Event::clear()
 {
-    if (d) {
-        d->flag.storeRelease(false);
-    }
+    QSharedPointer<EventPrivate> d = this->d;
+    d->flag.storeRelease(false);
 }
 
 bool Event::wait(unsigned long time)
 {
-    if (d) {
-        return d->wait(time);
-    } else {
-        return false;
-    }
+    QSharedPointer<EventPrivate> d = this->d;
+    return d->wait(time);
 }
 
 bool Event::isSet() const
 {
-    if (d) {
-        return d->flag.loadAcquire();
-    } else {
-        return false;
-    }
+    QSharedPointer<EventPrivate> d = this->d;
+    return d->flag.loadAcquire();
 }
 
 quint32 Event::getting() const
 {
-    if (d) {
-        return d->waiters.loadAcquire();
-    } else {
-        return 0;
-    }
+    QSharedPointer<EventPrivate> d = this->d;
+    return d->waiters.loadAcquire();
 }

@@ -241,6 +241,7 @@ void ImageViewer::paintEvent(QPaintEvent *event)
     viewport.moveCenter(rect().center());
     painter.drawPixmap(viewport, d->cached, source);
 
+    // 能否只绘制窗口被覆盖的部分，而不是整个窗口重绘？
     //    QRect ir = d->cached.rect();
     //    ir.setSize(ir.size() / dpr);
     //    ir.moveCenter(rect().center());

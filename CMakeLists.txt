@@ -27,6 +27,7 @@ set(LAFPLAY_INCLUDES
     image_viewer.h
     image_viewer_p.h
     animation_viewer.h
+    animation_viewer_p.h
     waitingspinnerwidget.h
     scanning_widget.h
     flow_view.h
@@ -77,13 +78,10 @@ target_link_libraries(lafplay PUBLIC Qt5::Core Qt5::Gui Qt5::Widgets)
 
 if (HAS_FFMPEG)
     target_sources(lafplay PRIVATE animation_viewer.h animation_viewer.cpp)
+    # 这里要怎么写比较好？在 linux 下找到 ffmpeg 是很容易的，
+    # 但是在 windows 下没有统一的位置，所以即使使用 FindFFMPEG 也很难找到库的位置。
     target_include_directories(lafplay PRIVATE "/usr/include/ffmpeg/" "/usr/local/inclue/ffmpeg/")
     target_link_libraries(lafplay PRIVATE ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${AVUTIL_LIBRARY} ${SWSCALE_LIBRARY})
-endif()
-
-if(HAS_QTNG)
-    target_link_libraries(lafplay PUBLIC qtnetworkng)
-    target_compile_definitions(lafplay PRIVATE -DLAFPLAY_WITH_QTNG)
 endif()
 
 if(LAFPLAY_BUILD_TESTS)

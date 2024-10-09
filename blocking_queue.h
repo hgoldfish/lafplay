@@ -2,6 +2,7 @@
 #define LAFPLAY_BLOCKING_QUEUE_H
 
 #include <QtCore/qqueue.h>
+#include <QtCore/qsharedpointer.h>
 #include <QtCore/qreadwritelock.h>
 
 class EventPrivate;
@@ -17,7 +18,7 @@ public:
     bool isSet() const;
     quint32 getting() const;
 private:
-    EventPrivate *d;
+    QSharedPointer<EventPrivate> d;
 };
 
 template<typename T>

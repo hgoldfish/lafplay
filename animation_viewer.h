@@ -1,29 +1,41 @@
 #ifndef LAFPLAY_ANIMATION_VIEWER_H
 #define LAFPLAY_ANIMATION_VIEWER_H
 
-#include "image_viewer.h"
+#include <QtWidgets/qwidget.h>
 
 class AnimationViewerPrivate;
-class AnimationViewer : public ImageViewer
+class AnimationViewer: public QWidget
 {
     Q_OBJECT
+public:
+    enum ParseResult {
+        ParseSuccess,
+        ParseFailed,
+        NotParsed,
+    };
 public:
     explicit AnimationViewer(QWidget *parent = nullptr);
     virtual ~AnimationViewer() override;
 public:
-    virtual QString imagePath() override;
+    QString url() const;
 public slots:
-    virtual bool setFile(const QString &filePath) override;
+    bool setUrl(const QString &url);
     bool play();
     void stop();
     void pause();
+    void resume();
     void setAutoRepeat(bool autoRepeat);
 protected:
-    void hideEvent(QHideEvent *event) override;
-    void showEvent(QShowEvent *event) override;
+    virtual void paintEvent(QPaintEvent *event) override;
+    virtual void resizeEvent(QResizeEvent *event) override;
+    virtual void hideEvent(QHideEvent *event) override;
+    virtual void showEvent(QShowEvent *event) override;
 signals:
+    void parsed(ParseResult result);
+    void started();
     void finished();
 private:
+    AnimationViewerPrivate * const dd_ptr;
     Q_DECLARE_PRIVATE_D(dd_ptr, AnimationViewer)
 };
 

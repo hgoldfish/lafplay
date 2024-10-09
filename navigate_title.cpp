@@ -51,18 +51,19 @@ NavigateTitlePrivate::~NavigateTitlePrivate()
 void NavigateTitlePrivate::updatelayout()
 {
     Q_Q(NavigateTitle);
-    int count = layout->count();
-    for (int i = count - 1; i >= 0; i--) {
-        QLayoutItem *item = layout->takeAt(i);
-        QWidget *w = item->widget();
-        delete w;
-        delete item;
+    // 这个写法是 Qt 文档里面推荐的。见 QLayoutItem *QLayout::takeAt(int index) 的函数文档。
+    QLayoutItem *child;
+    while ((child = layout->takeAt(0)) != nullptr) {
+        delete child->widget();
+        delete child;
     }
 
     QStringList titles = title.split(separator, Qt::SkipEmptyParts);
+    QFont f = q->font();
     for (int i = 0; i < titles.size(); i++) {
         const QString &t = titles.at(i).trimmed();
         QPushButton *btn = new QPushButton(i == titles.size() - 1 ? t : t + " " + separator, q);
+        btn->setFont(f);
         btn->setProperty("title", t);
         if (noHoverLevel.contains(i)) {
             btn->setStyleSheet("QPushButton{border:none; padding:1px 3px 1px 3px;}");
@@ -80,7 +81,7 @@ void NavigateTitlePrivate::updatelayout()
 
 void NavigateTitlePrivate::btnClicked()
 {
-    QPushButton *btn = static_cast<QPushButton *>(sender());
+    QPushButton *btn = dynamic_cast<QPushButton *>(sender());
     if (!btn) {
         return;
     }
@@ -203,7 +204,6 @@ void NavigateTitle::showPopup(int level, const QStringList &items)
     d->popupWidget->show();
 
     QPoint below = mapToGlobal(btn->geometry().bottomLeft());
-    ;
     below += QPoint(0, 2);
 
     int h = d->popupView->visualRect(d->popupModel->index(0)).height() * items.size();
