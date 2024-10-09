@@ -117,7 +117,7 @@ public:
     BlockingQueue<Command> commands;
     BlockingQueue<VideoFrame> frames;
     AnimationViewer::ParseResult state;
-    int frameBufferSize;
+    QAtomicInteger<int> frameBufferSize;
     QAtomicInteger<bool> autoRepeat;
     QAtomicInteger<bool> exiting;
     bool paused;

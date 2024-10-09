@@ -72,24 +72,24 @@ bool AVContext::initSwsContext()
 
 AVContext *makeContext(const QString &url, QString *reason)
 {
-    QScopedPointer<AVContext> tmpAvContext(new AVContext());
-    if (int ret = avformat_open_input(&tmpAvContext->formatCtx, qPrintable(url), nullptr, nullptr)) {
+    QScopedPointer<AVContext> context(new AVContext());
+    if (int ret = avformat_open_input(&context->formatCtx, qPrintable(url), nullptr, nullptr)) {
         if (reason) {
             *reason = QString::fromUtf8("can not open file: %1").arg(ret);
         }
-        tmpAvContext->formatCtx = nullptr;
+        context->formatCtx = nullptr;
         return nullptr;
     }
 
-    tmpAvContext->videoStream = av_find_best_stream(tmpAvContext->formatCtx, AVMEDIA_TYPE_VIDEO, 0, 0, nullptr, 0);
-    if (tmpAvContext->videoStream < 0) {
+    context->videoStream = av_find_best_stream(context->formatCtx, AVMEDIA_TYPE_VIDEO, 0, 0, nullptr, 0);
+    if (context->videoStream < 0) {
         if (reason) {
             *reason = QString::fromUtf8("can not find video stream.");
         }
         return nullptr;
     }
 
-    AVStream *stream = tmpAvContext->formatCtx->streams[tmpAvContext->videoStream];
+    AVStream *stream = context->formatCtx->streams[context->videoStream];
     AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec) {
         if (reason) {
@@ -97,41 +97,41 @@ AVContext *makeContext(const QString &url, QString *reason)
         }
         return nullptr;
     }
-    tmpAvContext->codecCtx = avcodec_alloc_context3(codec);
-    if (!tmpAvContext->codecCtx) {
+    context->codecCtx = avcodec_alloc_context3(codec);
+    if (!context->codecCtx) {
         if (reason) {
             *reason = QString::fromUtf8("can not allocate codec context.");
         }
         return nullptr;
     }
-    if (avcodec_parameters_to_context(tmpAvContext->codecCtx, stream->codecpar) < 0) {
+    if (avcodec_parameters_to_context(context->codecCtx, stream->codecpar) < 0) {
         if (reason) {
             *reason = QString::fromUtf8("can not set parameters to codec context.");
         }
         return nullptr;
     }
-    if (avcodec_open2(tmpAvContext->codecCtx, nullptr, nullptr)) {
+    if (avcodec_open2(context->codecCtx, nullptr, nullptr)) {
         if (reason) {
             *reason = QString::fromUtf8("can not open codec context.");
         }
         return nullptr;
     }
-    tmpAvContext->nativeFrame = av_frame_alloc();
+    context->nativeFrame = av_frame_alloc();
     AVFrame *rgbFrame = av_frame_alloc();
-    tmpAvContext->rgbFrame = rgbFrame;
-    if (av_image_alloc(rgbFrame->data, rgbFrame->linesize, tmpAvContext->codecCtx->width,
-                       tmpAvContext->codecCtx->height, AV_PIX_FMT_RGBA, 32)
+    context->rgbFrame = rgbFrame;
+    if (av_image_alloc(rgbFrame->data, rgbFrame->linesize, context->codecCtx->width,
+                       context->codecCtx->height, AV_PIX_FMT_RGBA, 32)
         < 0) {
         if (reason) {
             *reason = QString::fromUtf8("can not allocate rgb frame buffer.");
         }
         return nullptr;
     }
-    tmpAvContext->width = rgbFrame->width = tmpAvContext->codecCtx->width;
-    tmpAvContext->height = rgbFrame->height = tmpAvContext->codecCtx->height;
+    context->width = rgbFrame->width = context->codecCtx->width;
+    context->height = rgbFrame->height = context->codecCtx->height;
     rgbFrame->format = AV_PIX_FMT_RGBA;
-    tmpAvContext->timeBase = av_q2d(stream->time_base);
-    return tmpAvContext.take();
+    context->timeBase = av_q2d(stream->time_base);
+    return context.take();
 }
 
 DecoderThread::DecoderThread(QObject *viewerPrivate)
@@ -205,12 +205,12 @@ bool DecoderThread::parse(const QString &url)
 {
     Q_ASSERT(!url.isEmpty() && state == AnimationViewer::NotParsed);
     QString reason;
-    AVContext *context = makeContext(url, &reason);
+    QScopedPointer<AVContext> context(makeContext(url, &reason));
     if (!context) {
         qCDebug(logger) << reason;
         return false;
     } else {
-        this->context.reset(context);
+        this->context.reset(context.take());
     }
     return true;
 }
@@ -232,7 +232,13 @@ DecoderThread::PlayResult DecoderThread::play()
         if (!commands.isEmpty()) {
             return PlayResult::Ready;
         }
-        if (frames.size() >= frameBufferSize) {
+
+#if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
+        int bsize = frameBufferSize.loadRelaxed();
+#else
+        int bsize = frameBufferSize.load();
+#endif
+        if (frames.size() >= bsize) {
             return PlayResult::Ready;
         }
         QScopedPointer<AVPacket, ScopedPointerAvPacketDeleter> packet(av_packet_alloc());
@@ -416,7 +422,7 @@ QString AnimationViewer::url() const
     return d->mediaUrl;
 }
 
-bool AnimationViewer::setUrl(const QString &url)
+void AnimationViewer::setUrl(const QString &url)
 {
     Q_D(AnimationViewer);
     d->mediaUrl = url;
@@ -425,7 +431,13 @@ bool AnimationViewer::setUrl(const QString &url)
     d->thread->commands.put(cmd);
 }
 
-bool AnimationViewer::play()
+void AnimationViewer::setFrameBufferSize(int size)
+{
+    Q_D(AnimationViewer);
+    d->thread->frameBufferSize.storeRelaxed(size);
+}
+
+void AnimationViewer::play()
 {
     Q_D(AnimationViewer);
     DecoderThread::Command cmd(DecoderThread::Command::Play);

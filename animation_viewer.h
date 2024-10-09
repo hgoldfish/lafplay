@@ -18,9 +18,11 @@ public:
     virtual ~AnimationViewer() override;
 public:
     QString url() const;
+    bool isPlaying() const;
 public slots:
-    bool setUrl(const QString &url);
-    bool play();
+    void setUrl(const QString &url);
+    void setFrameBufferSize(int size);
+    void play();
     void stop();
     void pause();
     void resume();
