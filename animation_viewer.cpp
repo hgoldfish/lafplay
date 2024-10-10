@@ -631,5 +631,3 @@ QList<QImage> convertVideoToImages(const QString &filePath, QString *reason)
         }
     }
 }
-
-#include "animation_viewer.moc"

@@ -428,5 +428,3 @@ void ImageViewer::setTransformationMode(Qt::TransformationMode transformationMod
         d->rebuildCached();
     }
 }
-
-#include "image_viewer.moc"
