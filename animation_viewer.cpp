@@ -385,7 +385,12 @@ AnimationViewerPrivate::~AnimationViewerPrivate()
 void AnimationViewerPrivate::parsed(int result)
 {
     Q_Q(AnimationViewer);
-    emit q->parsed(static_cast<AnimationViewer::ParseResult>(result));
+    AnimationViewer::ParseResult r = static_cast<AnimationViewer::ParseResult>(result);
+    if (r != AnimationViewer::ParseSuccess) {
+        playTime = 0;
+        nextFrameTimer.stop();
+    }
+    emit q->parsed(r);
 }
 
 void AnimationViewerPrivate::next()
